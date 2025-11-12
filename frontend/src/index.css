@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap');
+
+/* Base styles */
+html {
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+body {
+  background-color: #f8fafc;
+  color: #334155;
+  font-family: 'Montserrat', system-ui, sans-serif;
+}
+
+/* Buttons */
+.btn-primary {
+  @apply bg-primary-500 hover:bg-primary-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-200 shadow-sm hover:shadow-md;
+}
+
+.btn-secondary {
+  @apply bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-200;
+}
+
+.btn-outline {
+  @apply border border-primary-500 text-primary-600 hover:bg-primary-500 hover:text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-200;
+}
+
+/* Cards & Inputs */
+.card {
+  @apply bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow duration-200;
+}
+
+.input-primary {
+  @apply w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200;
+}
+
+/* Nav links */
+.nav-link {
+  @apply px-4 py-2 rounded-lg transition-colors duration-200 font-medium;
+}
+
+.nav-link.active {
+  @apply bg-primary-500 text-white;
+}
+
+.nav-link:not(.active) {
+  @apply text-gray-600 hover:text-primary-600 hover:bg-primary-50;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.fade-in {
+  animation: fadeIn 0.5s ease-in-out;
+}
+
+.slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+
+.loading-spinner {
+  border-top-color: #F8AD41;
+}
