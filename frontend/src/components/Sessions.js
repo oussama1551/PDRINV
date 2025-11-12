@@ -177,8 +177,10 @@ const CorrectionModal = ({ count, onClose, onCorrect }) => {
 
 const Sessions = ({ user }) => {
     const [counts, setCounts] = useState([]);
+    const [filteredCounts, setFilteredCounts] = useState([]);
     const [sessions, setSessions] = useState([]);
     const [users, setUsers] = useState([]);
+    const [locations, setLocations] = useState([]);
     const [articlesMap, setArticlesMap] = useState({}); // Map to store article details: {id: {numero, description, location}}
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -191,7 +193,8 @@ const Sessions = ({ user }) => {
         sessionId: '',
         articleSearchTerm: '', // New search term for article number or description
         round: '',
-        countedByUserId: ''
+        countedByUserId: '',
+        location: ''
     });
 
     const clearMessages = useCallback(() => {
@@ -208,6 +211,8 @@ const Sessions = ({ user }) => {
             setSessions(fetchedSessions);
             const fetchedUsers = await fetchData('/users/');
             setUsers(fetchedUsers);
+            const locationsData = await fetchData('/articles/unique_values?columns=code_emplacement');
+            setLocations(locationsData.code_emplacement || []);
         } catch (err) {
             console.error("Failed to fetch static data:", err);
             // Do not set global error, as counts might still load
@@ -363,6 +368,14 @@ const Sessions = ({ user }) => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessions.length, users.length]);
 
+    useEffect(() => {
+        let countsToFilter = [...counts];
+        if (filters.location) {
+            countsToFilter = countsToFilter.filter(c => c.article_location === filters.location);
+        }
+        setFilteredCounts(countsToFilter);
+    }, [filters.location, counts]);
+
     const fetchSessionStats = useCallback(async (sessionId) => {
         if (!sessionId) {
             setSessionStats(null);
@@ -421,7 +434,7 @@ const Sessions = ({ user }) => {
                     <h2 className="text-lg font-semibold text-gray-800 mb-3 flex items-center">
                         <FunnelIcon className="h-5 w-5 mr-2" /> Filter Counts
                     </h2>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                         {/* Session Selector */}
                         <select
                             name="sessionId"
@@ -445,6 +458,19 @@ const Sessions = ({ user }) => {
                             <option value="">All Users</option>
                             {users.map(u => (
                                 <option key={u.id} value={u.id}>{u.full_name || u.username} (ID: {u.id})</option>
+                            ))}
+                        </select>
+
+                        {/* Location Selector */}
+                        <select
+                            name="location"
+                            value={filters.location}
+                            onChange={handleFilterChange}
+                            className="block w-full rounded-lg border-gray-300 p-2 text-sm"
+                        >
+                            <option value="">All Locations</option>
+                            {locations.map(loc => (
+                                <option key={loc} value={loc}>{loc}</option>
                             ))}
                         </select>
 
@@ -485,15 +511,15 @@ const Sessions = ({ user }) => {
                 {/* Counts List */}
                 <div className="bg-white shadow-lg rounded-xl p-4 border border-gray-200">
                     <h2 className="text-lg font-semibold text-gray-800 mb-3">
-                        Total Counts Found: {counts.length}
+                        Total Counts Found: {filteredCounts.length}
                     </h2>
                     
-                    {loading && counts.length === 0 ? (
+                    {loading && filteredCounts.length === 0 ? (
                         <div className="text-center p-8 text-gray-500">
                             <ArrowPathIcon className="h-8 w-8 mx-auto mb-2 animate-spin" />
                             <p>Loading counts...</p>
                         </div>
-                    ) : counts.length === 0 ? (
+                    ) : filteredCounts.length === 0 ? (
                         <div className="text-center p-8 text-gray-500 border-2 border-dashed border-gray-300 rounded-xl">
                             <p className="font-medium">No counts match the current filters.</p>
                         </div>
@@ -515,7 +541,7 @@ const Sessions = ({ user }) => {
                                     </tr>
                                 </thead>
                                 <tbody className="bg-white divide-y divide-gray-200">
-                                    {counts.map((count) => (
+                                    {filteredCounts.map((count) => (
                                         <tr key={count.id} className="hover:bg-gray-50">
                                             <td className="px-4 py-2 whitespace-nowrap text-sm font-medium text-gray-900">{count.id}</td>
                                             <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.session_name}</td>

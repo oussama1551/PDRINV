@@ -59,7 +59,6 @@ const login = async (username, password) => {
 
     const { access_token, user: userData } = response.data;
     
-    console.log('Access Token:', access_token);
     localStorage.setItem('token', access_token);
     axios.defaults.headers.common['Authorization'] = `Bearer ${access_token}`;
     setUser(userData);
