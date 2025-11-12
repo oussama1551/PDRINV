@@ -61,6 +61,34 @@ const StatusMessage = ({ type, message }) => {
     );
 };
 
+const SessionStats = ({ stats }) => {
+    if (!stats) return null;
+
+    return (
+        <div className="bg-gray-50 shadow-lg rounded-xl p-4 mb-6 border border-gray-200">
+            <h2 className="text-lg font-semibold text-gray-800 mb-3">Session Statistics: {stats.session_name}</h2>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div>
+                    <p className="font-medium text-gray-500">Total Counts</p>
+                    <p className="text-xl font-bold text-gray-900">{stats.total_counts}</p>
+                </div>
+                <div>
+                    <p className="font-medium text-gray-500">Unique Articles</p>
+                    <p className="text-xl font-bold text-gray-900">{stats.unique_articles}</p>
+                </div>
+                <div>
+                    <p className="font-medium text-gray-500">New Articles Found</p>
+                    <p className="text-xl font-bold text-gray-900">{stats.new_articles_found}</p>
+                </div>
+                <div>
+                    <p className="font-medium text-gray-500">Status</p>
+                    <p className={`text-xl font-bold ${stats.status === 'open' ? 'text-green-600' : 'text-red-600'}`}>{stats.status}</p>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // Modal for Count Correction
 const CorrectionModal = ({ count, onClose, onCorrect }) => {
     const [newQuantity, setNewQuantity] = useState(count.quantity_counted);
@@ -151,16 +179,17 @@ const Sessions = ({ user }) => {
     const [counts, setCounts] = useState([]);
     const [sessions, setSessions] = useState([]);
     const [users, setUsers] = useState([]);
-    const [articlesMap, setArticlesMap] = useState({}); // Map to store article details: {id: {numero, description}}
+    const [articlesMap, setArticlesMap] = useState({}); // Map to store article details: {id: {numero, description, location}}
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [successMessage, setSuccessMessage] = useState(null);
     const [correctionModalOpen, setCorrectionModalOpen] = useState(false);
     const [selectedCount, setSelectedCount] = useState(null);
+    const [sessionStats, setSessionStats] = useState(null);
 
     const [filters, setFilters] = useState({
         sessionId: '',
-        articleId: '', // Still allow article ID filtering
+        articleSearchTerm: '', // New search term for article number or description
         round: '',
         countedByUserId: ''
     });
@@ -175,20 +204,10 @@ const Sessions = ({ user }) => {
     // --- Data Fetching for Selectors ---
     const fetchStaticData = useCallback(async () => {
         try {
-            // 1. Fetch Sessions
             const fetchedSessions = await fetchData('/sessions/');
             setSessions(fetchedSessions);
-
-            // 2. Fetch Users (Assuming /users/ endpoint exists and returns id, username, full_name)
-            // If /users/ doesn't exist, this will fail, and we'll rely on data from counts.
-            try {
-                const fetchedUsers = await fetchData('/users/');
-                setUsers(fetchedUsers);
-            } catch (e) {
-                console.warn("Could not fetch /users/ endpoint. Relying on user data from counts.");
-                setUsers([]);
-            }
-            
+            const fetchedUsers = await fetchData('/users/');
+            setUsers(fetchedUsers);
         } catch (err) {
             console.error("Failed to fetch static data:", err);
             // Do not set global error, as counts might still load
@@ -204,48 +223,48 @@ const Sessions = ({ user }) => {
         try {
             const queryParams = new URLSearchParams();
             if (filters.sessionId) queryParams.append('session_id', filters.sessionId);
-            if (filters.articleId) queryParams.append('article_id', filters.articleId);
             if (filters.round) queryParams.append('round_number', filters.round);
             if (filters.countedByUserId) queryParams.append('counted_by_user_id', filters.countedByUserId);
 
-            // Endpoint: GET /api/v1/counts/
+            // New logic for article filtering based on search term
+            if (filters.articleSearchTerm) {
+                const searchResults = await fetchData(`/articles/search/?q=${filters.articleSearchTerm}`);
+                const articleIdsFromSearch = searchResults.map(a => a.id);
+
+                if (articleIdsFromSearch.length === 0) {
+                    setCounts([]); // No articles found for the search term
+                    setLoading(false);
+                    return;
+                }
+                // Append all found article IDs to the query
+                articleIdsFromSearch.forEach(id => queryParams.append('article_id', id));
+            }
+
             const rawCounts = await fetchData(`/counts/?limit=1000&${queryParams.toString()}`);
             
             // --- Data Enrichment ---
-            
-            // 1. Collect unique Article IDs
             const articleIds = [...new Set(rawCounts.map(c => c.article_id))];
-            
-            // 2. Fetch Article Details (Assuming a bulk or efficient way to get article details)
-            // Since we don't have a bulk endpoint, we'll fetch them one by one or rely on the search endpoint
-            // For simplicity and to avoid too many requests, we'll assume a GET /articles/{id} or rely on the search endpoint.
-            // A better approach is to assume the backend has an endpoint to get article details by ID list.
-            // For now, we'll use the search endpoint to get the details we need for the map.
-            
-            // A more robust way: fetch all articles if the list is small, or fetch details for each ID.
-            // Given the lack of a bulk article detail endpoint, we'll fetch the article details for each unique ID.
             
             const newArticlesMap = { ...articlesMap };
             const articlePromises = articleIds.map(async (id) => {
                 if (!newArticlesMap[id]) {
                     try {
-                        // Assuming an endpoint to get article by ID exists
                         const articleDetail = await fetchData(`/articles/${id}`);
                         newArticlesMap[id] = {
                             numero: articleDetail.numero_article,
-                            description: articleDetail.description_article
+                            description: articleDetail.description_article,
+                            location: articleDetail.code_emplacement || 'N/A' // Store location
                         };
                     } catch (e) {
-                        newArticlesMap[id] = { numero: `ID ${id}`, description: 'Details unavailable' };
+                        newArticlesMap[id] = { numero: `ID ${id}`, description: 'Details unavailable', location: 'N/A' };
                     }
                 }
             });
             await Promise.all(articlePromises);
             setArticlesMap(newArticlesMap);
 
-            // 3. Enrich Counts
             const enrichedCounts = rawCounts.map(count => {
-                const articleInfo = newArticlesMap[count.article_id] || { numero: `ID ${count.article_id}`, description: 'Loading...' };
+                const articleInfo = newArticlesMap[count.article_id] || { numero: `ID ${count.article_id}`, description: 'Loading...', location: 'N/A' };
                 const userInfo = users.find(u => u.id === count.counted_by_user_id) || { username: `User ${count.counted_by_user_id}`, full_name: 'Unknown User' };
                 const sessionInfo = sessions.find(s => s.id === count.session_id) || { nom_session: `Session ${count.session_id}` };
 
@@ -253,6 +272,7 @@ const Sessions = ({ user }) => {
                     ...count,
                     article_numero: articleInfo.numero,
                     article_description: articleInfo.description,
+                    article_location: articleInfo.location,
                     user_username: userInfo.username,
                     user_full_name: userInfo.full_name,
                     session_name: sessionInfo.nom_session
@@ -335,17 +355,37 @@ const Sessions = ({ user }) => {
     }, [fetchStaticData]);
 
     useEffect(() => {
-        // Initial fetch of counts after static data is loaded
-        // This will run once after static data is fetched and populated
+        // Initial fetch of counts after static data is loaded.
+        // Subsequent fetches are triggered by the "Apply Filters" button.
         if (sessions.length > 0 || users.length > 0) {
             fetchCounts();
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessions.length, users.length]);
 
+    const fetchSessionStats = useCallback(async (sessionId) => {
+        if (!sessionId) {
+            setSessionStats(null);
+            return;
+        }
+        try {
+            const stats = await fetchData(`/sessions/${sessionId}/statistics`);
+            setSessionStats(stats);
+        } catch (err) {
+            console.error("Failed to fetch session stats:", err);
+            setSessionStats(null); // Clear stats on error
+            setError(`Failed to load session statistics: ${err.message}`);
+            clearMessages();
+        }
+    }, [clearMessages]);
 
     const handleFilterChange = (e) => {
         const { name, value } = e.target;
         setFilters(prev => ({ ...prev, [name]: value }));
+
+        if (name === 'sessionId') {
+            fetchSessionStats(value);
+        }
     };
 
     const openCorrectionModal = (count) => {
@@ -355,7 +395,7 @@ const Sessions = ({ user }) => {
 
     return (
         <div className="p-6">
-            <div className="max-w-7xl mx-auto">
+            <div className="max-w-full mx-auto">
                 <h1 className="text-3xl font-bold text-gray-900 mb-6">Session & Count Management</h1>
                 <p className="text-sm text-gray-500 mb-4">
                     User: {user.username} | Role: {user.role}
@@ -363,6 +403,9 @@ const Sessions = ({ user }) => {
 
                 <StatusMessage type="error" message={error} />
                 <StatusMessage type="success" message={successMessage} />
+
+                {/* Session Statistics */}
+                <SessionStats stats={sessionStats} />
 
                 {/* Correction Modal */}
                 {correctionModalOpen && selectedCount && (
@@ -405,12 +448,12 @@ const Sessions = ({ user }) => {
                             ))}
                         </select>
 
-                        {/* Article ID Filter (Still useful for specific lookups) */}
+                        {/* Article Search Filter */}
                         <input
-                            type="number"
-                            name="articleId"
-                            placeholder="Article ID"
-                            value={filters.articleId}
+                            type="text"
+                            name="articleSearchTerm"
+                            placeholder="Search Article No. or Desc..."
+                            value={filters.articleSearchTerm}
                             onChange={handleFilterChange}
                             className="block w-full rounded-lg border-gray-300 p-2 text-sm"
                         />
@@ -463,6 +506,7 @@ const Sessions = ({ user }) => {
                                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session</th>
                                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Article No.</th>
                                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
+                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
                                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Round</th>
                                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
                                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Counted By</th>
@@ -477,6 +521,7 @@ const Sessions = ({ user }) => {
                                             <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.session_name}</td>
                                             <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.article_numero}</td>
                                             <td className="px-4 py-2 text-sm text-gray-500 max-w-xs truncate">{count.article_description}</td>
+                                            <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.article_location}</td>
                                             <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.round}</td>
                                             <td className="px-4 py-2 whitespace-nowrap text-sm font-bold text-gray-900">{count.quantity_counted}</td>
                                             <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.user_full_name || count.user_username}</td>
