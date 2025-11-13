@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { MagnifyingGlassIcon, CubeIcon, CheckCircleIcon, XCircleIcon, ArrowPathIcon, ClockIcon } from '@heroicons/react/24/outline';
 
 // --- Utility Functions (Reusing structure from dashboard.js) ---
@@ -68,6 +68,7 @@ const CountingInterface = ({ user, currentSessionId = 2 }) => {
   const [countQuantity, setCountQuantity] = useState(0);
   
   // State for data and status
+  const [lastCounts, setLastCounts] = useState({});
   const [article, setArticle] = useState(null);
   // History now uses the more detailed endpoint /counting-history/session/{id}/article/{id}
   const [articleHistory, setArticleHistory] = useState([]); 
@@ -89,6 +90,19 @@ const CountingInterface = ({ user, currentSessionId = 2 }) => {
       setError(null);
       setSuccessMessage(null);
     }, 5000);
+  }, []);
+
+  // NEW: Fetch Last Counts for all counters in the session
+  const fetchLastCounts = useCallback(async (sessionId) => {
+    if (!sessionId) return;
+    try {
+      // Endpoint: GET /api/v1/counts/last-counted/{session_id}
+      const counts = await fetchData(`/counts/last-counted/${sessionId}`);
+      setLastCounts(counts);
+    } catch (err) {
+      console.error("Failed to fetch last counts:", err);
+      // Do not set global error, just log it
+    }
   }, []);
 
   // NEW: Fetch Count History for the current article and session
@@ -131,6 +145,17 @@ const CountingInterface = ({ user, currentSessionId = 2 }) => {
       clearMessages();
     }
   }, [clearMessages, currentSessionId, fetchArticleHistory]);
+
+  // Initial fetch of last counts and re-fetch on session change
+  useEffect(() => {
+    fetchLastCounts(currentSessionId);
+    // Set up a refresh interval (e.g., every 30 seconds)
+    const intervalId = setInterval(() => {
+        fetchLastCounts(currentSessionId);
+    }, 30000); // Refresh every 30 seconds
+
+    return () => clearInterval(intervalId); // Cleanup on unmount or session change
+  }, [currentSessionId, fetchLastCounts]);
 
   // Type-ahead search logic
   const handleArticleSearchChange = (value) => {
@@ -236,6 +261,9 @@ const CountingInterface = ({ user, currentSessionId = 2 }) => {
       
       setSuccessMessage(`Count of ${countQuantity} for article ${article.numero_article} submitted successfully in Round ${roundToSubmit}!`);
       
+      // Immediately re-fetch last counts to update the widget
+      fetchLastCounts(currentSessionId);
+
       // We need to re-fetch the article details to get the latest history
       // Note: We use the article's number to re-fetch, which will also clear the form.
       // If the user wants to count the same article again, they will need to re-scan/re-enter.
@@ -261,19 +289,50 @@ const CountingInterface = ({ user, currentSessionId = 2 }) => {
 
   // Mobile-First UI Components
 
-  const StatusMessage = ({ type, message }) => {
-    if (!message) return null;
-    const isSuccess = type === 'success';
-    const Icon = isSuccess ? CheckCircleIcon : XCircleIcon;
-    const color = isSuccess ? 'bg-green-100 border-green-400 text-green-700' : 'bg-red-100 border-red-400 text-red-700';
+  const LastCountsWidget = () => {
+    const countsArray = Object.values(lastCounts);
+    if (countsArray.length === 0) return null;
+
+    // Filter for the current user's last count to display it prominently
+    const currentUserCount = countsArray.find(c => c.user_id === user.id);
+    const otherCounts = countsArray.filter(c => c.user_id !== user.id);
 
     return (
-      <div className={`p-3 border rounded-lg flex items-center mb-4 ${color}`} role="alert">
-        <Icon className="h-5 w-5 mr-2 flex-shrink-0" />
-        <p className="text-sm font-medium">{message}</p>
+      <div className="bg-white shadow-lg rounded-xl p-4 mb-6 border border-gray-200">
+        <h3 className="text-lg font-bold text-gray-900 mb-3 border-b pb-2">Last Counts by Counter</h3>
+        
+        {currentUserCount && (
+            <div className="mb-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                <p className="text-sm font-semibold text-blue-700">Your Last Count:</p>
+                <p className="text-lg font-bold text-blue-900 truncate">{currentUserCount.article_numero}</p>
+                <p className="text-xs text-gray-600">
+                    {currentUserCount.quantity_counted} units in Round {currentUserCount.round} at {formatTime(currentUserCount.counted_at)}
+                </p>
+            </div>
+        )}
+
+        {otherCounts.length > 0 && (
+            <div className="space-y-2 max-h-40 overflow-y-auto">
+                <p className="text-sm font-medium text-gray-700">Other Counters:</p>
+                {otherCounts.map((count) => (
+                    <div key={count.user_id} className="flex justify-between items-center text-sm p-2 bg-gray-50 rounded-lg">
+                        <div className="flex-1 min-w-0 mr-2">
+                            <p className="font-semibold text-gray-800 truncate">{count.username}</p>
+                            <p className="text-xs text-gray-500 truncate">{count.article_numero} ({count.quantity_counted})</p>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                            <p className="text-xs text-gray-600">R{count.round}</p>
+                            <p className="text-xs text-gray-600">{formatTime(count.counted_at)}</p>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        )}
       </div>
     );
   };
+
+
 
   const ArticleDetailsCard = () => {
     if (!article) return null;
@@ -354,14 +413,16 @@ const CountingInterface = ({ user, currentSessionId = 2 }) => {
     <div className="min-h-screen bg-gray-50 p-4 sm:p-6">
       <div className="max-w-md mx-auto">
         <h1 className="text-2xl font-bold text-gray-900 mb-1">Count Entry</h1>
-        <p className="text-sm text-gray-500 mb-4">
+	        <p className="text-sm text-gray-500 mb-4">
             Session ID: {currentSessionId} 
             {isCompteur && countingRound && <span className="ml-2 px-2 py-0.5 text-xs bg-yellow-100 text-yellow-800 rounded-full">Round {countingRound}</span>}
             <span className="ml-2">| User: {user.username}</span>
         </p>
 
-        <StatusMessage type="error" message={error} />
-        <StatusMessage type="success" message={successMessage} />
+	      
+
+	        {/* NEW: Last Counts Widget */}
+	        <LastCountsWidget />
 
         {/* 1. Article Search/Scan Form (Always visible) */}
         <form onSubmit={handleArticleSearch} className="mb-6">

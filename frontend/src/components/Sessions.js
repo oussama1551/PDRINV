@@ -117,7 +117,7 @@ const CorrectionModal = ({ count, onClose, onCorrect }) => {
                 <form onSubmit={handleSubmit}>
                     <div className="mb-4">
                         <label className="block text-sm font-medium text-gray-700">Original Quantity</label>
-                        <p className="text-xl font-bold text-blue-600">{count.quantity_counted}</p>
+                        <p className="text-xl font-bold text-blue-600">{count.quantity_counted ? count.quantity_counted.toFixed(2) : '0.00'}</p>
                     </div>
                     <div className="mb-4">
                         <label htmlFor="newQuantity" className="block text-sm font-medium text-gray-700">New Quantity</label>
@@ -231,24 +231,22 @@ const Sessions = ({ user }) => {
             if (filters.round) queryParams.append('round_number', filters.round);
             if (filters.countedByUserId) queryParams.append('counted_by_user_id', filters.countedByUserId);
 
-            // New logic for article filtering based on search term
-            if (filters.articleSearchTerm) {
-                const searchResults = await fetchData(`/articles/search/?q=${filters.articleSearchTerm}`);
-                const articleIdsFromSearch = searchResults.map(a => a.id);
+            // Add location filter to query params for server-side filtering
+            if (filters.location) queryParams.append('location', filters.location);
 
-                if (articleIdsFromSearch.length === 0) {
-                    setCounts([]); // No articles found for the search term
-                    setLoading(false);
-                    return;
-                }
-                // Append all found article IDs to the query
-                articleIdsFromSearch.forEach(id => queryParams.append('article_id', id));
-            }
+            // Add article search term to query params for server-side filtering
+            if (filters.articleSearchTerm) queryParams.append('article_search', filters.articleSearchTerm);
             
-            const rawCounts = await fetchData(`/counts/?limit=1000&${queryParams.toString()}`);
+            const rawCounts = await fetchData('/counts/?' + queryParams.toString());
             
             // --- Data Enrichment ---
-            const articleIds = [...new Set(rawCounts.map(c => c.article_id))];
+            // Ensure quantity_counted is a float for correct display and correction
+            const countsWithFloatQuantity = rawCounts.map(c => ({
+                ...c,
+                quantity_counted: parseFloat(c.quantity_counted)
+            }));
+
+            const articleIds = [...new Set(countsWithFloatQuantity.map(c => c.article_id))];
             
             const newArticlesMap = { ...articlesMap };
             const articlePromises = articleIds.map(async (id) => {
@@ -261,7 +259,7 @@ const Sessions = ({ user }) => {
                             location: articleDetail.code_emplacement || 'N/A' // Store location
                         };
                     } catch (e) {
-                        newArticlesMap[id] = { numero: `ID ${id}`, description: 'Details unavailable', location: 'N/A' };
+                        newArticlesMap[id] = { numero: 'ID ' + id, description: 'Details unavailable', location: 'N/A' };
                     }
                 }
             });
@@ -269,9 +267,9 @@ const Sessions = ({ user }) => {
             setArticlesMap(newArticlesMap);
 
             const enrichedCounts = rawCounts.map(count => {
-                const articleInfo = newArticlesMap[count.article_id] || { numero: `ID ${count.article_id}`, description: 'Loading...', location: 'N/A' };
-                const userInfo = users.find(u => u.id === count.counted_by_user_id) || { username: `User ${count.counted_by_user_id}`, full_name: 'Unknown User' };
-                const sessionInfo = sessions.find(s => s.id === count.session_id) || { nom_session: `Session ${count.session_id}` };
+                const articleInfo = newArticlesMap[count.article_id] || { numero: 'ID ' + count.article_id, description: 'Loading...', location: 'N/A' };
+                const userInfo = users.find(u => u.id === count.counted_by_user_id) || { username: 'User ' + count.counted_by_user_id, full_name: 'Unknown User' };
+                const sessionInfo = sessions.find(s => s.id === count.session_id) || { nom_session: 'Session ' + count.session_id };
 
                 return {
                     ...count,
@@ -284,10 +282,50 @@ const Sessions = ({ user }) => {
                 };
             });
 
-            setCounts(enrichedCounts);
-        } catch (err) {
+	            // Group counts by article_id and session_id to compare R1 and R2
+	            const groupedCountsMap = enrichedCounts.reduce((acc, count) => {
+	                const key = count.article_id + '-' + count.session_id;
+	                if (!acc[key]) {
+	                    acc[key] = {
+	                        article_id: count.article_id,
+	                        session_id: count.session_id,
+	                        article_numero: count.article_numero,
+	                        article_description: count.article_description,
+	                        article_location: count.article_location,
+	                        session_name: count.session_name,
+	                        count_r1: null,
+	                        count_r2: null,
+	                        last_counted_at: null,
+	                        last_counted_by: null,
+	                        // Keep the original count object for the correction modal, prioritizing R2 if present
+	                        count_object: null 
+	                    };
+	                }
+	
+	                // Assuming round_number is 1 or 2
+	                if (count.round_number === 1) {
+	                    acc[key].count_r1 = count.quantity_counted;
+	                } else if (count.round_number === 2) {
+	                    acc[key].count_r2 = count.quantity_counted;
+	                }
+	
+	                // Update last counted info
+	                const currentCountedAt = new Date(count.counted_at);
+	                if (!acc[key].last_counted_at || currentCountedAt > new Date(acc[key].last_counted_at)) {
+	                    acc[key].last_counted_at = count.counted_at;
+	                    acc[key].last_counted_by = count.user_full_name || count.user_username;
+	                    acc[key].count_object = count; // Store the full count object for the correction modal
+	                }
+	
+	                return acc;
+	            }, {});
+	
+	            const groupedCounts = Object.values(groupedCountsMap);
+	
+	            setCounts(groupedCounts);
+	        } catch (err) {
             console.error("Failed to fetch counts:", err);
-            setError(`Failed to load counts: ${err.message}`);
+            setError('Failed to load counts: ' + err.message);
             setCounts([]);
         } finally {
             setLoading(false);
@@ -309,13 +347,13 @@ const Sessions = ({ user }) => {
             // Endpoint: DELETE /api/v1/counts/{count_id}
             await fetchData(`/counts/${countId}`, { method: 'DELETE' });
             
-            setSuccessMessage(`Count ID ${countId} deleted successfully.`);
+            setSuccessMessage('Count ID ' + countId + ' deleted successfully.');
             // Re-fetch the list to update the UI
             await fetchCounts();
 
         } catch (err) {
             console.error("Failed to delete count:", err);
-            setError(`Failed to delete count ID ${countId}: ${err.message}`);
+            setError('Failed to delete count ID ' + countId + ': ' + err.message);
         } finally {
             setLoading(false);
             clearMessages();
@@ -346,7 +384,7 @@ const Sessions = ({ user }) => {
 
         } catch (err) {
             console.error("Failed to correct count:", err);
-            setError(`Failed to correct count ID ${countId}: ${err.message}`);
+            setError('Failed to correct count ID ' + countId + ': ' + err.message);
         } finally {
             setLoading(false);
             clearMessages();
@@ -368,13 +406,11 @@ const Sessions = ({ user }) => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessions.length, users.length]);
 
+    // The filteredCounts state is now directly set to counts, as all filtering is done server-side
+    // The only client-side filtering needed is for the location, which is now handled by the API
     useEffect(() => {
-        let countsToFilter = [...counts];
-        if (filters.location) {
-            countsToFilter = countsToFilter.filter(c => c.article_location === filters.location);
-        }
-        setFilteredCounts(countsToFilter);
-    }, [filters.location, counts]);
+        setFilteredCounts(counts);
+    }, [counts]);
 
     const fetchSessionStats = useCallback(async (sessionId) => {
         if (!sessionId) {
@@ -387,7 +423,7 @@ const Sessions = ({ user }) => {
         } catch (err) {
             console.error("Failed to fetch session stats:", err);
             setSessionStats(null); // Clear stats on error
-            setError(`Failed to load session statistics: ${err.message}`);
+            setError('Failed to load session statistics: ' + err.message);
             clearMessages();
         }
     }, [clearMessages]);
@@ -528,50 +564,50 @@ const Sessions = ({ user }) => {
                             <table className="min-w-full divide-y divide-gray-200">
                                 <thead className="bg-gray-50">
                                     <tr>
-                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
-                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session</th>
-                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Article No.</th>
-                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
-                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
-                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Round</th>
-                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
-                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Counted By</th>
-                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time</th>
-                                        <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+	                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Article ID</th>
+	                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session</th>
+	                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Article No.</th>
+	                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
+	                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
+	                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity R1</th>
+	                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity R2</th>
+	                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Counted By</th>
+	                                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Count Time</th>
+	                                        <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody className="bg-white divide-y divide-gray-200">
                                     {filteredCounts.map((count) => (
-                                        <tr key={count.id} className="hover:bg-gray-50">
-                                            <td className="px-4 py-2 whitespace-nowrap text-sm font-medium text-gray-900">{count.id}</td>
+                                        <tr key={count.article_id + '-' + count.session_id} className={`hover:bg-gray-50 ${count.count_object && count.count_object.is_new ? 'bg-yellow-100 border-l-4 border-yellow-500' : ''}`}>
+	                                        <td className="px-4 py-2 whitespace-nowrap text-sm font-medium text-gray-900">{count.article_id}</td>
                                             <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.session_name}</td>
                                             <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.article_numero}</td>
                                             <td className="px-4 py-2 text-sm text-gray-500 max-w-xs truncate">{count.article_description}</td>
-                                            <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.article_location}</td>
-                                            <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.round}</td>
-                                            <td className="px-4 py-2 whitespace-nowrap text-sm font-bold text-gray-900">{count.quantity_counted}</td>
-                                            <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.user_full_name || count.user_username}</td>
-                                            <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{formatTime(count.counted_at)}</td>
-                                            <td className="px-4 py-2 whitespace-nowrap text-right text-sm font-medium space-x-2">
-                                                {/* Correction Button */}
-                                                <button
-                                                    onClick={() => openCorrectionModal(count)}
-                                                    disabled={loading || user.role !== 'admin'}
-                                                    className="text-blue-600 hover:text-blue-900 disabled:opacity-50"
-                                                    title="Correct Count"
-                                                >
-                                                    <PencilSquareIcon className="h-5 w-5 inline" />
-                                                </button>
-                                                {/* Delete Button */}
-                                                <button
-                                                    onClick={() => handleDeleteCount(count.id)}
-                                                    disabled={loading || user.role !== 'admin'}
-                                                    className="text-red-600 hover:text-red-900 disabled:opacity-50"
-                                                    title="Delete Count"
-                                                >
-                                                    <TrashIcon className="h-5 w-5 inline" />
-                                                </button>
-                                            </td>
+	                                        <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.article_location}</td>
+	                                        <td className="px-4 py-2 whitespace-nowrap text-sm font-bold text-gray-900">{count.count_r1 ? count.count_r1.toFixed(2) : '-'}</td>
+	                                        <td className="px-4 py-2 whitespace-nowrap text-sm font-bold text-gray-900">{count.count_r2 ? count.count_r2.toFixed(2) : '-'}</td>
+	                                        <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{count.last_counted_by || 'N/A'}</td>
+	                                        <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">{formatTime(count.last_counted_at)}</td>
+	                                        <td className="px-4 py-2 whitespace-nowrap text-right text-sm font-medium space-x-2">
+	                                            {/* Correction Button */}
+	                                            <button
+	                                                onClick={() => openCorrectionModal(count.count_object)}
+	                                                disabled={loading || user.role !== 'admin' || !count.count_object}
+	                                                className="text-blue-600 hover:text-blue-900 disabled:opacity-50"
+	                                                title="Correct Count"
+	                                            >
+	                                                <PencilSquareIcon className="h-5 w-5 inline" />
+	                                            </button>
+	                                            {/* Delete Button */}
+	                                            <button
+	                                                onClick={() => handleDeleteCount(count.count_object.id)}
+	                                                disabled={loading || user.role !== 'admin' || !count.count_object}
+	                                                className="text-red-600 hover:text-red-900 disabled:opacity-50"
+	                                                title="Delete Count"
+	                                            >
+	                                                <TrashIcon className="h-5 w-5 inline" />
+	                                            </button>
+	                                        </td>
                                         </tr>
                                     ))}
                                 </tbody>

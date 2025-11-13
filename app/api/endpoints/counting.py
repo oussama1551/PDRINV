@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from sqlalchemy import func, desc
+from typing import List, Optional, Dict
 from datetime import datetime
 
 from app.database import get_db
@@ -10,11 +11,11 @@ from app.models.articles import Article
 from app.models.users import AppUser
 from app.schemas.counting import (
     InventorySessionCreate, InventorySessionUpdate, InventorySessionResponse,
-    InventoryCountCreate, InventoryCountResponse, InventoryCountWithArticle, SessionWithCounts
+    InventoryCountCreate, InventoryCountResponse, InventoryCountWithArticle, SessionWithCounts,
+    CountingHistoryResponse, CountingHistoryWithDetails
 )
 from app.api.dependencies import get_current_user, require_admin, can_count_round
 from app.models.counting import CountingHistory
-from app.schemas.counting import CountingHistoryResponse, CountingHistoryWithDetails
 
 
 router = APIRouter()
@@ -215,7 +216,7 @@ def create_count(
     current_user: AppUser = Depends(get_current_user)  # All authenticated users can count
 ):
     """
-    Submit a count (All authenticated users)
+    Submit a count (All authenticated users). If a count already exists for the same article, session, round, and user, it is corrected.
     """
     # Verify session exists
     session = db.query(InventorySession).filter(InventorySession.id == count.session_id).first()
@@ -249,7 +250,7 @@ def create_count(
                 detail=f"Your role can only count in round {user_round}"
             )
     
-    # Check for duplicate count (same session, article, round, user)
+    # Check for existing count (same session, article, round, user)
     existing_count = db.query(InventoryCount).filter(
         InventoryCount.session_id == count.session_id,
         InventoryCount.article_id == count.article_id,
@@ -258,31 +259,60 @@ def create_count(
     ).first()
     
     if existing_count:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Count already submitted for this article in this round"
+        # User requested: "we dont search again if find again and must count"
+        # This is interpreted as correcting the existing count.
+        
+        old_quantity = existing_count.quantity_counted
+        
+        # Update the existing count
+        existing_count.quantity_counted = count.quantity_counted
+        existing_count.notes = count.notes
+        existing_count.version += 1
+        
+        db.commit()
+        db.refresh(existing_count)
+        
+        # Log correction to history
+        log_counting_history(
+            db=db,
+            session_id=count.session_id,
+            article_id=count.article_id,
+            round=count.round,
+            quantity_counted=count.quantity_counted,
+            counted_by_user_id=count.counted_by_user_id,
+            action="corrected",
+            previous_quantity=old_quantity,
+            count_id=existing_count.id,
+            correction_reason="Recount/Correction by same user",
+            notes=count.notes
         )
+        
+        print(f"User {current_user.username} corrected count for article {article.numero_article} in round {count.round}: {old_quantity} -> {count.quantity_counted}")
+        
+        return existing_count
     
-    db_count = InventoryCount(**count.dict())
-    db.add(db_count)
-    db.commit()
-    db.refresh(db_count)
+    else:
+        # Create a new count
+        db_count = InventoryCount(**count.dict())
+        db.add(db_count)
+        db.commit()
+        db.refresh(db_count)
 
         # Log to history
-    log_counting_history(
-        db=db,
-        session_id=count.session_id,
-        article_id=count.article_id,
-        round=count.round,
-        quantity_counted=count.quantity_counted,
-        counted_by_user_id=count.counted_by_user_id,
-        action="created",
-        notes=count.notes
-    )
-    
-    print(f"User {current_user.username} submitted count for article {article.numero_article} in round {count.round}")
-    
-    return db_count
+        log_counting_history(
+            db=db,
+            session_id=count.session_id,
+            article_id=count.article_id,
+            round=count.round,
+            quantity_counted=count.quantity_counted,
+            counted_by_user_id=count.counted_by_user_id,
+            action="created",
+            notes=count.notes
+        )
+        
+        print(f"User {current_user.username} submitted new count for article {article.numero_article} in round {count.round}")
+        
+        return db_count
 
 @router.get("/counts/", response_model=List[InventoryCountResponse])
 def get_counts(
@@ -290,13 +320,15 @@ def get_counts(
     article_id: Optional[int] = None,
     round_number: Optional[int] = None,
     counted_by_user_id: Optional[int] = None,
+    location: Optional[str] = None,  # New filter for location
+    article_search: Optional[str] = None, # New filter for article number or description
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: AppUser = Depends(get_current_user)  # All authenticated users
+    current_user: AppUser = Depends(get_current_user)
 ):
     """
-    Get counts with filtering (All authenticated users)
+    Get all counts with filters (All authenticated users)
     """
     query = db.query(InventoryCount)
     
@@ -308,6 +340,21 @@ def get_counts(
         query = query.filter(InventoryCount.round == round_number)
     if counted_by_user_id:
         query = query.filter(InventoryCount.counted_by_user_id == counted_by_user_id)
+    
+    # Filtering by location and article search requires joining with the Article table
+    if location or article_search:
+        query = query.join(Article, InventoryCount.article_id == Article.id)
+        
+        if location:
+            query = query.filter(Article.code_emplacement == location)
+            
+        if article_search:
+            # Case-insensitive search on article number or description
+            search_term = f"%{article_search}%"
+            query = query.filter(
+                (Article.numero_article.ilike(search_term)) |
+                (Article.description_article.ilike(search_term))
+            )
     
     return query.order_by(InventoryCount.counted_at.desc()).offset(skip).limit(limit).all()
 
@@ -423,6 +470,78 @@ def log_counting_history(
     return history_entry
 
 # ===============================
+# NEW ENDPOINT: LAST COUNTED ARTICLE
+# ===============================
+
+class LastCountedArticle(BaseModel):
+    article_numero: str
+    article_description: Optional[str]
+    article_location: Optional[str]
+    counted_at: datetime
+    quantity_counted: float
+    round: int
+    user_id: int
+    username: str
+
+@router.get("/counts/last-counted/{session_id}", response_model=Dict[int, LastCountedArticle])
+def get_last_counted_articles(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(get_current_user)
+):
+    """
+    Get the last article counted by each user in a specific session.
+    Returns a dictionary where the key is the user_id and the value is the LastCountedArticle.
+    """
+    
+    # 1. Find the maximum counted_at timestamp for each user in the session
+    subquery = db.query(
+        InventoryCount.counted_by_user_id,
+        func.max(InventoryCount.counted_at).label('max_counted_at')
+    ).filter(
+        InventoryCount.session_id == session_id
+    ).group_by(InventoryCount.counted_by_user_id).subquery()
+    
+    # 2. Join the subquery with InventoryCount, Article, and AppUser to get the full details
+    # We use the max_counted_at to filter for the single latest count per user.
+    # Note: If a user has two counts at the exact same millisecond, this might return both, 
+    # but for practical purposes, it should be fine.
+    latest_counts = db.query(
+        InventoryCount,
+        Article.numero_article,
+        Article.description_article,
+        Article.code_emplacement,
+        AppUser.username
+    ).join(
+        subquery, 
+        (InventoryCount.counted_by_user_id == subquery.c.counted_by_user_id) & 
+        (InventoryCount.counted_at == subquery.c.max_counted_at)
+    ).join(
+        Article, InventoryCount.article_id == Article.id
+    ).join(
+        AppUser, InventoryCount.counted_by_user_id == AppUser.id
+    ).filter(
+        InventoryCount.session_id == session_id
+    ).all()
+    
+    results = {}
+    for count, numero, description, location, username in latest_counts:
+        # Ensure we only keep one entry per user_id in case of ties in timestamp
+        if count.counted_by_user_id not in results:
+            results[count.counted_by_user_id] = LastCountedArticle(
+                article_numero=numero,
+                article_description=description,
+                article_location=location,
+                counted_at=count.counted_at,
+                quantity_counted=float(count.quantity_counted),
+                round=count.round,
+                user_id=count.counted_by_user_id,
+                username=username
+            )
+            
+    return results
+
+# ===============================
 # STATISTICS ENDPOINTS
 # ===============================
 
@@ -451,7 +570,7 @@ def get_session_statistics(
     # Counts by round
     counts_by_round = db.query(
         InventoryCount.round,
-        db.func.count(InventoryCount.id).label('count')
+        func.count(InventoryCount.id).label('count')
     ).filter(
         InventoryCount.session_id == session_id
     ).group_by(InventoryCount.round).all()
@@ -459,7 +578,7 @@ def get_session_statistics(
     # Counts by user
     counts_by_user = db.query(
         AppUser.username,
-        db.func.count(InventoryCount.id).label('count')
+        func.count(InventoryCount.id).label('count')
     ).join(
         InventoryCount, InventoryCount.counted_by_user_id == AppUser.id
     ).filter(
