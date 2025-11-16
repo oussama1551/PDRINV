@@ -3,6 +3,9 @@ from typing import Optional, List
 from pydantic import BaseModel, validator
 from .base import BaseSchema
 
+class SuccessMessage(BaseModel):
+    message: str
+
 class InventorySessionBase(BaseModel):
     nom_session: str
     depot: str
@@ -47,7 +50,11 @@ class InventoryCountBase(BaseModel):
         return v
 
 class InventoryCountCreate(InventoryCountBase):
-    pass
+    article_location: Optional[str] = None # Added for location update on count
+
+class InventoryCountUpdate(BaseModel):
+    quantity_change: float
+    notes: Optional[str] = None
 
 class InventoryCountResponse(InventoryCountBase, BaseSchema):
     id: int
@@ -87,3 +94,26 @@ class CountingHistoryWithDetails(CountingHistoryResponse):
     user_username: Optional[str] = None
     user_full_name: Optional[str] = None
     session_name: Optional[str] = None
+
+class LastCountedArticle(BaseModel):
+    article_numero: str
+    article_description: Optional[str]
+    article_location: Optional[str]
+    counted_at: datetime
+    quantity_counted: float
+    round: int
+    user_id: int
+    username: str
+    count_id: int # Added for the update button
+
+class LastCountedArticleForUser(BaseModel):
+    count_id: int
+    article_id: int
+    article_numero: str
+    article_description: Optional[str]
+    article_location: Optional[str]
+    quantity_counted: float
+    round: int
+    counted_at: datetime
+    session_id: int
+    session_name: str

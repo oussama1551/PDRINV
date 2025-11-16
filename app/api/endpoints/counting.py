@@ -11,8 +11,8 @@ from app.models.articles import Article
 from app.models.users import AppUser
 from app.schemas.counting import (
     InventorySessionCreate, InventorySessionUpdate, InventorySessionResponse,
-    InventoryCountCreate, InventoryCountResponse, InventoryCountWithArticle, SessionWithCounts,
-    CountingHistoryResponse, CountingHistoryWithDetails
+    InventoryCountCreate, InventoryCountUpdate, InventoryCountResponse, InventoryCountWithArticle, SessionWithCounts,
+    CountingHistoryResponse, CountingHistoryWithDetails, LastCountedArticle, LastCountedArticleForUser, SuccessMessage
 )
 from app.api.dependencies import get_current_user, require_admin, can_count_round
 from app.models.counting import CountingHistory
@@ -166,11 +166,9 @@ def get_session_with_counts(
     # Get counts with article details
     counts_with_articles = db.query(
         InventoryCount,
-        Article.numero_article,
-        Article.description_article,
-        Article.code_emplacement
-    ).join(
-        Article, InventoryCount.article_id == Article.id
+         Article.numero_article.label("article_numero"),
+        Article.description_article.label("article_description"),
+        Article.code_emplacement.label("article_location"), InventoryCount.article_id == Article.id
     ).filter(
         InventoryCount.session_id == session_id
     ).all()
@@ -209,7 +207,7 @@ def get_session_with_counts(
 # COUNTING ENDPOINTS
 # ===============================
 
-@router.post("/counts/", response_model=InventoryCountResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/counts/", response_model=SuccessMessage, status_code=status.HTTP_201_CREATED)
 def create_count(
     count: InventoryCountCreate,
     db: Session = Depends(get_db),
@@ -289,30 +287,38 @@ def create_count(
         
         print(f"User {current_user.username} corrected count for article {article.numero_article} in round {count.round}: {old_quantity} -> {count.quantity_counted}")
         
-        return existing_count
+        return SuccessMessage(message="Count corrected successfully.")
     
     else:
         # Create a new count
-        db_count = InventoryCount(**count.dict())
+        db_count = InventoryCount(**count.dict(exclude={'article_location'}))
         db.add(db_count)
-        db.commit()
+        
+        # 2. Update article location if provided in the count data
+        if count.article_location and article.code_emplacement != count.article_location:
+            article.code_emplacement = count.article_location
+            db.add(article) # Mark article as dirty for update
+            
+        db.commit() # Commit both the count and the article update
         db.refresh(db_count)
-
-        # Log to history
+        db.refresh(article)
+        
+        # 3. Log the new count to history
         log_counting_history(
             db=db,
-            session_id=count.session_id,
-            article_id=count.article_id,
-            round=count.round,
-            quantity_counted=count.quantity_counted,
-            counted_by_user_id=count.counted_by_user_id,
+            session_id=db_count.session_id,
+            article_id=db_count.article_id,
+            round=db_count.round,
+            quantity_counted=db_count.quantity_counted,
+            counted_by_user_id=db_count.counted_by_user_id,
             action="created",
-            notes=count.notes
+            count_id=db_count.id,
+            notes=db_count.notes
         )
         
-        print(f"User {current_user.username} submitted new count for article {article.numero_article} in round {count.round}")
+        print(f"User {current_user.username} created new count for article {article.numero_article} in round {count.round}: {count.quantity_counted}. Location updated to {article.code_emplacement}")
         
-        return db_count
+        return SuccessMessage(message="Count submitted successfully")
 
 @router.get("/counts/", response_model=List[InventoryCountResponse])
 def get_counts(
@@ -387,11 +393,9 @@ def get_counts_by_session_and_round(
     """
     counts_with_articles = db.query(
         InventoryCount,
-        Article.numero_article,
-        Article.description_article,
-        Article.code_emplacement
-    ).join(
-        Article, InventoryCount.article_id == Article.id
+         Article.numero_article.label("article_numero"),
+        Article.description_article.label("article_description"),
+        Article.code_emplacement.label("article_location"), InventoryCount.article_id == Article.id
     ).filter(
         InventoryCount.session_id == session_id,
         InventoryCount.round == round_number
@@ -470,8 +474,106 @@ def log_counting_history(
     return history_entry
 
 # ===============================
+# NEW ENDPOINT: UPDATE COUNT BY DELTA
+# ===============================
+
+@router.patch("/counts/{count_id}/update_quantity", response_model=InventoryCountResponse)
+def update_count_quantity(
+    count_id: int,
+    update: InventoryCountUpdate,
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(get_current_user)
+):
+    """
+    Update the quantity of an existing count by adding or subtracting a value.
+    """
+    existing_count = db.query(InventoryCount).filter(InventoryCount.id == count_id).first()
+
+    if not existing_count:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Count not found"
+        )
+
+    # Check if the user is authorized to update this count
+    if existing_count.counted_by_user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to update this count"
+        )
+
+    old_quantity = existing_count.quantity_counted
+    new_quantity = old_quantity + update.quantity_change
+
+    if new_quantity < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Quantity cannot be negative"
+        )
+
+    existing_count.quantity_counted = new_quantity
+    if update.notes:
+        existing_count.notes = update.notes
+    existing_count.version += 1
+
+    db.commit()
+
+    log_counting_history(
+        db=db,
+        session_id=existing_count.session_id,
+        article_id=existing_count.article_id,
+        round=existing_count.round,
+        quantity_counted=new_quantity,
+        counted_by_user_id=current_user.id,
+        action="updated_by_delta",
+        previous_quantity=old_quantity,
+        count_id=existing_count.id,
+        correction_reason=f"Quantity updated by {update.quantity_change}",
+        notes=update.notes
+    )
+
+    db.refresh(existing_count)
+    return existing_count
+
+# ===============================
+# NEW ENDPOINT: LAST COUNTED ARTICLE FOR CURRENT USER
+# ===============================
+
+@router.get("/counts/last-for-user/", response_model=List[LastCountedArticleForUser])
+def get_last_counts_for_user(
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: AppUser = Depends(get_current_user)
+):
+    """
+    Get the last N counts for the currently logged-in user across all sessions.
+    """
+    counts = db.query(
+        InventoryCount.id.label("count_id"),
+        Article.id.label("article_id"),
+        Article.numero_article.label("article_numero"),
+        Article.description_article.label("article_description"),
+        Article.code_emplacement.label("article_location"),
+        InventoryCount.quantity_counted,
+        InventoryCount.round,
+        InventoryCount.counted_at,
+        InventorySession.id.label("session_id"),
+        InventorySession.nom_session.label("session_name")
+    ).join(
+        Article, InventoryCount.article_id == Article.id
+    ).join(
+        InventorySession, InventoryCount.session_id == InventorySession.id
+    ).filter(
+        InventoryCount.counted_by_user_id == current_user.id
+    ).order_by(desc(InventoryCount.counted_at)).limit(limit).all()
+
+    return [LastCountedArticleForUser(**count._asdict()) for count in counts]
+
+
+# ===============================
 # NEW ENDPOINT: LAST COUNTED ARTICLE
 # ===============================
+
 
 class LastCountedArticle(BaseModel):
     article_numero: str
